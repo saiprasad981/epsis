@@ -1,0 +1,17 @@
+torch
+torchvision
+torchaudio
+numpy
+opencv-python
+Pillow
+matplotlib
+scikit-image
+albumentations
+tqdm
+PyYAML
+einops
+omegaconf
+tensorboard
+future
+joblib
+pandas
