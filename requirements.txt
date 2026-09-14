@@ -1,0 +1,25 @@
+# --- Core Deep Learning & Computer Vision ---
+torch
+torchvision
+numpy
+opencv-python
+Pillow
+matplotlib
+scikit-image
+scikit-learn
+pandas
+
+# --- Remote Sensing & Geospatial AI ---
+earthengine-api
+rasterio
+
+# --- Web UI & Visualization ---
+streamlit
+folium
+streamlit-folium
+python-dotenv
+requests
+tqdm
+PyYAML
+einops
+omegaconf
