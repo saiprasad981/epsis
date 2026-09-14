@@ -1,30 +1,59 @@
+"""
+gee_utils.py — Google Earth Engine & STAC Fallback Utilities for EPSIS
+=======================================================================
+Provides satellite image acquisition helpers with explicit bounding box
+clipping to ensure spatial registration between T1 and T2 images.
+"""
+
 import os
 import tempfile
-
-import ee
 import requests
+import math
+from config import GCP_PROJECT_ID, CLOUD_FILTER_MAX_PERCENT
 
-GEE_PROJECT = "epsis-502113"  # <-- set this to your actual GCP project id
+try:
+    import ee
+    GEE_AVAILABLE = True
+except ImportError:
+    GEE_AVAILABLE = False
 
-ee.Initialize(project=GEE_PROJECT)
-
-CLOUD_FILTER_PERCENT = 10
+GEE_PROJECT = GCP_PROJECT_ID
+CLOUD_FILTER_PERCENT = CLOUD_FILTER_MAX_PERCENT
 RGB_BANDS = ["B4", "B3", "B2"]
 VIS_MIN, VIS_MAX = 0, 3000
-THUMBNAIL_DIMENSIONS = 1024  # display quality; inference.py resizes to 256 separately
+THUMBNAIL_DIMENSIONS = 512
+
+# Safely attempt GEE initialization without crashing import
+_GEE_INITIALIZED = False
+if GEE_AVAILABLE:
+    try:
+        ee.Initialize(project=GEE_PROJECT)
+        _GEE_INITIALIZED = True
+    except Exception as _e:
+        print(f"[gee_utils] GEE Notice: {_e}")
 
 
-def get_satellite_image(latitude, longitude, start_date, end_date):
+def get_bounding_box(latitude, longitude, buffer_m=1000):
+    """Returns GEE Geometry BBox around target lat/lon."""
+    lat_delta = buffer_m / 111320.0
+    lon_delta = buffer_m / (111320.0 * math.cos(math.radians(latitude)))
+    return [longitude - lon_delta, latitude - lat_delta, longitude + lon_delta, latitude + lat_delta]
+
+
+def get_satellite_image(latitude, longitude, start_date, end_date, buffer_m=1000):
     """
-    Fetches the least cloudy Sentinel-2 SR Harmonized image for the given
-    location and date range. Returns an ee.Image (a single image, not a
-    collection) — raises a clear ValueError if nothing matches.
+    Fetches least cloudy Sentinel-2 image for target location and date range.
+    Returns (ee_image, region_bbox_geometry).
     """
-    point = ee.Geometry.Point([longitude, latitude])
+    if not _GEE_INITIALIZED:
+        raise ValueError("Google Earth Engine is not initialized or authenticated.")
+
+    bbox = get_bounding_box(latitude, longitude, buffer_m)
+    region = ee.Geometry.BBox(bbox[0], bbox[1], bbox[2], bbox[3])
 
     collection = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-        .filterBounds(point)
+        .filterBounds(region)
         .filterDate(str(start_date), str(end_date))
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", CLOUD_FILTER_PERCENT))
         .sort("CLOUDY_PIXEL_PERCENTAGE")
@@ -34,21 +63,18 @@ def get_satellite_image(latitude, longitude, start_date, end_date):
     if count == 0:
         raise ValueError(
             f"No Sentinel-2 images found between {start_date} and {end_date} "
-            f"with <{CLOUD_FILTER_PERCENT}% cloud cover at ({latitude}, {longitude}). "
-            f"Try widening the date range."
+            f"with <{CLOUD_FILTER_PERCENT}% cloud cover at ({latitude:.4f}, {longitude:.4f})."
         )
 
-    return collection.first()
+    return collection.first(), region
 
 
-def get_image_thumbnail(image) -> str:
+def get_image_thumbnail(image, region=None) -> str:
     """
-    Returns a thumbnail URL (string) for displaying a single ee.Image in
-    Streamlit via st.image(). This is a URL, not local image bytes — use
-    save_temp_image() below to get an actual file on disk for model input.
+    Returns thumbnail URL for ee.Image with explicit region clipping.
     """
     if image is None:
-        raise ValueError("get_image_thumbnail() received None instead of an ee.Image.")
+        raise ValueError("get_image_thumbnail() received None.")
 
     vis_params = {
         "bands": RGB_BANDS,
@@ -58,21 +84,18 @@ def get_image_thumbnail(image) -> str:
         "dimensions": THUMBNAIL_DIMENSIONS,
         "format": "png",
     }
+    if region is not None:
+        vis_params["region"] = region
+
     return image.getThumbURL(vis_params)
 
 
 def save_temp_image(thumbnail_url: str) -> str:
-    """
-    Downloads a GEE thumbnail URL and saves it as a local PNG file, since
-    inference.py's predict_change() needs an actual file path (PIL.Image.open),
-    not a URL. Returns the local file path.
-    """
+    """Downloads thumbnail URL to temp file."""
     response = requests.get(thumbnail_url, timeout=30)
     response.raise_for_status()
 
     tmp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     tmp_file.write(response.content)
     tmp_file.close()
-
-    print(f"[gee_utils] Saved temp image: {tmp_file.name} ({len(response.content)} bytes)")
     return tmp_file.name

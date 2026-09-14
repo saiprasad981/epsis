@@ -7,35 +7,17 @@ Two backends, tried in order:
   1. Photon (photon.komoot.io) — free, OSM-based, no API key, no strict
      header requirements. Primary choice.
   2. Nominatim (nominatim.openstreetmap.org) — fallback if Photon returns
-     nothing. Nominatim's bot-protection layer sometimes returns 403 even
-     with a valid User-Agent, depending on network/IP — that's a
-     server-side block we can't fully control from our side, which is why
-     it's the fallback rather than the primary.
-
-Returns a LIST of candidates (not just the first hit) with a place_type
-field (village/town/city/state_district/etc.), because place names repeat
-across different states/districts in India — the app should let the user
-pick the right one rather than silently guessing.
+     nothing.
 """
 
 import requests
+from config import USER_AGENT_HEADER
 
 PHOTON_URL = "https://photon.komoot.io/api/"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
-# A default `requests` User-Agent (e.g. "python-requests/2.31.0") is a known
-# bot signature that a lot of college/corporate firewalls and proxies block
-# outright, regardless of which service you're calling. Using a normal
-# browser-like User-Agent avoids that class of block. Nominatim's own policy
-# additionally wants a real identifying contact — put yours below.
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-NOMINATIM_CONTACT_UA = "EPSIS-BTech-Project/1.0 (contact: your-email@example.com)"  # <-- put a real contact here
-
 COMMON_HEADERS = {
-    "User-Agent": BROWSER_USER_AGENT,
+    "User-Agent": USER_AGENT_HEADER,
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -50,13 +32,8 @@ def geocode_location(query: str, limit: int = 5) -> dict:
     Returns:
         {
             "candidates": [...],
-            "errors": [str, ...],       # backend failures encountered
-            "any_backend_reachable": bool,  # True if at least one backend
-                                             # returned a real (even empty)
-                                             # response — tells the caller
-                                             # whether "no results" means
-                                             # "genuinely no match" or
-                                             # "couldn't even check".
+            "errors": [str, ...],
+            "any_backend_reachable": bool,
         }
     """
     if not query or not query.strip():
@@ -69,7 +46,7 @@ def geocode_location(query: str, limit: int = 5) -> dict:
     if photon_error:
         errors.append(f"Photon: {photon_error}")
     else:
-        any_reachable = True  # Photon responded, even if with 0 results
+        any_reachable = True
     if photon_candidates:
         return {"candidates": photon_candidates, "errors": errors, "any_backend_reachable": True}
 
@@ -133,7 +110,7 @@ def _geocode_photon(query: str, limit: int):
 def _geocode_nominatim(query: str, limit: int):
     """Returns (candidates: list, error: str|None)."""
     params = {"q": query.strip(), "format": "json", "limit": limit}
-    headers = {**COMMON_HEADERS, "User-Agent": NOMINATIM_CONTACT_UA}
+    headers = {**COMMON_HEADERS}
     try:
         resp = requests.get(NOMINATIM_URL, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
