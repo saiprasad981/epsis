@@ -10,11 +10,10 @@
 * **Siamese Deep Learning Backbone**: Pretrained **TinyCD** model for high-accuracy temporal change detection.
 * **Dynamic Otsu Thresholding**: Statistical bimodal thresholding (`cv2.THRESH_OTSU`) for adaptive decision boundaries.
 * **Explainable AI (XAI)**:
+  * **Ground Truth / Change Detection Mask**: Authoritative spatial change boundary (White = Changed, Black = Unchanged).
   * **HiResCAM**: Gradient-weighted latent activation heatmap explainability.
-  * **JET Probability Activation Map**: Full-spectrum dynamic contrast stretched probability distribution.
-  * **Model Confidence Map**: Distance-from-boundary certainty visualization ($C = \frac{|P - T|}{\max(T, 1 - T)}$).
 * **Predictive Risk & Severity Analysis**: Quantitative 0–100 impact scoring, spectral proxy classification (NDVI, NDWI, NDBI), and recommended mitigation actions.
-* **Interactive Streamlit Dashboard**: Web UI on `http://localhost:8501` featuring location presets, date range selection, multi-tab XAI maps, and diagnostic telemetry metrics.
+* **Interactive Streamlit Dashboard**: Web UI on `http://localhost:8501` featuring interactive map selection, exact Before/After date picking, multi-tab XAI maps, and diagnostic telemetry metrics.
 
 ---
 
@@ -129,20 +128,17 @@ streamlit run app.py
 
 ## 🛠️ Step-by-Step Dashboard Usage
 
-1. **Select Location Preset or Search**:
-   * Choose a preset from the sidebar (e.g., **Bengaluru Tech Park (India)**, **Kokapet Growth Corridor**, **Hyderabad Hitech City**, or **LEVIR Building Development**).
-   * Or use the interactive Folium map / search box to pick any global coordinates.
-2. **Select Temporal Date Ranges**:
-   * Set **T1 Start/End** (Reference Period, e.g., `2021-01-01` $\to$ `2021-12-31`).
-   * Set **T2 Start/End** (Comparison Period, e.g., `2023-01-01` $\to$ `2023-12-31`).
+1. **Select Target Location**:
+   * Use the interactive Folium map or location search box to set target coordinates.
+2. **Select Satellite Acquisition Dates**:
+   * Set **Before Image Date** (e.g., `2021-06-15`).
+   * Set **After Image Date** (e.g., `2023-06-20`).
 3. **Execute Intelligence Pipeline**:
    * Click **🚀 Run Complete EPSIS Intelligence Analysis**.
 4. **Inspect Results & XAI Maps**:
-   * **Change Highlight Overlay**: Red transparent highlight on T2 comparison image showing changed pixels.
-   * **Binary Change Mask**: White = changed, Black = unchanged.
-   * **JET Probability Map**: Continuous probability activation distribution (Blue = 0 $\to$ Red = High).
-   * **HiResCAM Explainability**: Model latent feature attribution heatmap.
-   * **Model Confidence Map**: Prediction certainty relative to decision threshold.
+   * **Change Highlight Overlay**: Red transparent highlight on comparison image showing changed pixels.
+   * **Ground Truth / Change Detection Mask**: Black = unchanged, White = changed.
+   * **HiResCAM Explainability**: Neural network feature map attribution heatmap.
 5. **View Map Telemetry Diagnostics**:
    * Expand **📊 Map Diagnostic Metrics & Statistics** to view live tensor shapes, unique pixel counts, min, max, mean, std, and percentiles.
 

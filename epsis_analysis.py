@@ -98,8 +98,8 @@ def classify_change_type(ref_path: str, comp_path: str, mask: np.ndarray) -> dic
         }
 
     try:
-        ref_arr = np.array(Image.open(ref_path).convert("RGB").resize((256, 256))).astype(float)
-        comp_arr = np.array(Image.open(comp_path).convert("RGB").resize((256, 256))).astype(float)
+        ref_arr = np.array(Image.open(ref_path).convert("RGB").resize((mask.shape[1], mask.shape[0]))).astype(float)
+        comp_arr = np.array(Image.open(comp_path).convert("RGB").resize((mask.shape[1], mask.shape[0]))).astype(float)
 
         mask_bool = mask > 0
         r1, g1, b1 = ref_arr[mask_bool, 0], ref_arr[mask_bool, 1], ref_arr[mask_bool, 2]

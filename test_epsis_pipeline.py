@@ -1,7 +1,7 @@
 """
 test_epsis_pipeline.py — Automated Verification Test Suite for EPSIS
 ===================================================================
-Tests satellite pair fetching, TinyCD inference (LEVIR-CD & WHU-CD),
+Tests exact Before/After satellite pair fetching, TinyCD inference (LEVIR-CD & WHU-CD),
 HiResCAM explainability, Change Classification, Severity Analysis,
 and Risk Assessment.
 """
@@ -22,16 +22,23 @@ def test_epsis_end_to_end():
 
     # Coordinates for active urban growth zone (Hitech City / Kokapet, Hyderabad)
     lat, lon = 17.3950, 78.3300
-    ref_start, ref_end = "2021-01-01", "2021-12-31"
-    comp_start, comp_end = "2023-01-01", "2023-12-31"
+    before_date = "2021-06-15"
+    after_date = "2023-06-20"
 
-    print(f"\n[TEST 1] Acquiring satellite pair for ({lat}, {lon})...")
-    ref_path, comp_path, sat_meta = fetch_satellite_pair(lat, lon, ref_start, ref_end, comp_start, comp_end, buffer_m=1000)
+    print(f"\n[TEST 1] Acquiring satellite pair for ({lat}, {lon}) on Before: {before_date}, After: {after_date}...")
+    ref_path, comp_path, sat_meta = fetch_satellite_pair(lat, lon, before_date, after_date, buffer_m=1000)
     assert os.path.exists(ref_path), "Reference T1 image file missing!"
     assert os.path.exists(comp_path), "Comparison T2 image file missing!"
     print(f"  -> Provider: {sat_meta.get('provider')}")
+    print(f"  -> Before Image (Requested: {sat_meta.get('before_requested')}, Acquired: {sat_meta.get('before_actual')})")
+    print(f"  -> After Image  (Requested: {sat_meta.get('after_requested')}, Acquired: {sat_meta.get('after_actual')})")
     print(f"  -> Reference Path: {ref_path}")
     print(f"  -> Comparison Path: {comp_path}")
+
+    assert sat_meta.get("before_requested") == before_date, "Metadata before_requested mismatch!"
+    assert sat_meta.get("after_requested") == after_date, "Metadata after_requested mismatch!"
+    assert sat_meta.get("before_actual") is not None, "Metadata before_actual missing!"
+    assert sat_meta.get("after_actual") is not None, "Metadata after_actual missing!"
 
     # 2. Test LEVIR-CD Checkpoint Inference
     print("\n[TEST 2] Testing TinyCD Model Inference (LEVIR-CD checkpoint)...")
@@ -46,8 +53,8 @@ def test_epsis_end_to_end():
     print(f"  -> Overlay Shape: {res_levir['overlay_rgb'].shape}")
     print(f"  -> HiResCAM Shape: {res_levir['hirescam_rgb'].shape}")
 
-    assert prob_map.shape == (256, 256), "Probability map shape invalid!"
-    assert res_levir["hirescam_rgb"].shape == (256, 256, 3), "HiResCAM shape invalid!"
+    assert prob_map.ndim == 2, "Probability map shape invalid!"
+    assert res_levir["hirescam_rgb"].ndim == 3, "HiResCAM shape invalid!"
 
     # 3. Test WHU-CD Checkpoint Inference
     print("\n[TEST 3] Testing TinyCD Model Inference (WHU-CD checkpoint key remapping)...")
