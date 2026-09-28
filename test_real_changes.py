@@ -32,7 +32,6 @@ def test_site(name, lat, lon, before_date, after_date, thresh):
 
     analysis = analyze_detected_changes(ref_path, comp_path, prob_map, mask, lat, lon)
 
-    assert pred["hirescam_rgb"].shape == (256, 256, 3)
     assert "classification" in analysis
     assert "severity" in analysis
     assert "risk" in analysis
@@ -42,7 +41,6 @@ def test_site(name, lat, lon, before_date, after_date, thresh):
     print(f"  -> After Image:  Requested {meta.get('after_requested')} | Actual {meta.get('after_actual')}")
     print(f"  -> Raw Probability Max: {prob_map.max():.4f}, Mean: {prob_map.mean():.4f}")
     print(f"  -> Changed Area: {analysis['changed_percent']}% ({analysis['changed_pixels']} px, {analysis['changed_area_ha']} ha)")
-    print(f"  -> HiResCAM Map Generated: True")
 
 
 if __name__ == "__main__":

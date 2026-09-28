@@ -1,19 +1,18 @@
 # 🛰️ EPSIS — Explainable Predictive Satellite Intelligence System
 
-**EPSIS** (Explainable Predictive Satellite Intelligence System) is a production-grade Remote Sensing and Geospatial AI application for Sentinel-2 satellite image change detection, spectral land-cover classification, quantitative 0–100 severity analysis, contextual risk assessment, and Explainable AI (HiResCAM & Confidence Mapping).
+**EPSIS** (Explainable Predictive Satellite Intelligence System) is a production-grade Remote Sensing and Geospatial AI application for Sentinel-2 satellite image change detection, spectral land-cover classification, quantitative 0–100 severity analysis, contextual risk assessment, Reference Change Analysis, and Model Explainability (HiResCAM Attention Color Scale).
 
 ---
 
 ## 🌟 Key Features
 
-* **Satellite Imagery Engine**: Automated Sentinel-2 L2A imagery retrieval via **Google Earth Engine (GEE)** with STAC COG API fallback.
+* **Satellite Imagery Engine**: Automated Sentinel-2 L2A imagery retrieval via **Google Earth Engine (GEE)** preserving 10m native spatial resolution.
 * **Siamese Deep Learning Backbone**: Pretrained **TinyCD** model for high-accuracy temporal change detection.
 * **Dynamic Otsu Thresholding**: Statistical bimodal thresholding (`cv2.THRESH_OTSU`) for adaptive decision boundaries.
-* **Explainable AI (XAI)**:
-  * **Ground Truth / Change Detection Mask**: Authoritative spatial change boundary (White = Changed, Black = Unchanged).
-  * **HiResCAM**: Gradient-weighted latent activation heatmap explainability.
+* **Reference Change Analysis**: Independent temporal multi-spectral & structural difference comparison computed directly from T1/T2 GEE surface reflectance ($0 \to 255$ continuous grayscale spectrum).
+* **Model Explainability (HiResCAM)**: Paper-faithful gradient-weighted latent feature attribution heatmap ($\text{Blue} \to \text{Cyan} \to \text{Green} \to \text{Yellow} \to \text{Red}$).
 * **Predictive Risk & Severity Analysis**: Quantitative 0–100 impact scoring, spectral proxy classification (NDVI, NDWI, NDBI), and recommended mitigation actions.
-* **Interactive Streamlit Dashboard**: Web UI on `http://localhost:8501` featuring interactive map selection, exact Before/After date picking, multi-tab XAI maps, and diagnostic telemetry metrics.
+* **Interactive Streamlit Dashboard**: Web UI on `http://localhost:8501` featuring interactive map selection, date picking, side-by-side reference & explainability maps, and developer telemetry diagnostics.
 
 ---
 
@@ -134,22 +133,30 @@ streamlit run app.py
    * Set **Before Image Date** (e.g., `2021-06-15`).
    * Set **After Image Date** (e.g., `2023-06-20`).
 3. **Execute Intelligence Pipeline**:
-   * Click **🚀 Run Complete EPSIS Intelligence Analysis**.
-4. **Inspect Results & XAI Maps**:
-   * **Change Highlight Overlay**: Red transparent highlight on comparison image showing changed pixels.
-   * **Ground Truth / Change Detection Mask**: Black = unchanged, White = changed.
-   * **HiResCAM Explainability**: Neural network feature map attribution heatmap.
-5. **View Map Telemetry Diagnostics**:
-   * Expand **📊 Map Diagnostic Metrics & Statistics** to view live tensor shapes, unique pixel counts, min, max, mean, std, and percentiles.
+   * Click **🚀 Run Live GEE Change Analysis**.
+4. **Inspect Results**:
+   * **Temporal Satellite Imagery**: Side-by-side Before (T1) and After (T2) GEE RGB Surface Reflectance.
+   * **Reference Change Analysis**: Continuous grayscale difference map ($0 = \text{Black / Low Difference}$, $255 = \text{White / Strong Difference}$).
+   * **HiResCAM Attention Color Scale**: Feature attribution map ($\text{Blue} \to \text{Cyan} \to \text{Green} \to \text{Yellow} \to \text{Red}$).
+   * **Predictive Intelligence Report**: Land-cover class breakdown, 0–100 severity score, risk rating, and action items.
+5. **View Telemetry Diagnostics**:
+   * Expand **🔧 Developer Diagnostics** to view live tensor shapes, autograd activations/gradients, raw heatmap ranges, and ROI bounding box metadata.
 
 ---
 
 ## 🧪 Verification & Pipeline Testing
 
-To run automated verification tests on GEE authentication, TinyCD checkpoints, and pipeline execution without starting the web UI, run:
+To run automated verification tests on GEE authentication, TinyCD checkpoints, Reference Change Analysis, and HiResCAM autograd execution without starting the web UI, run:
 
 ```bash
 python test_epsis_pipeline.py
+```
+
+To run site matrix validation across multiple worldwide locations:
+
+```bash
+python test_real_changes.py
+python test_matrix_validation.py
 ```
 
 ---
@@ -158,13 +165,16 @@ python test_epsis_pipeline.py
 
 ```text
 EPSIS/
-├── app.py                      # Main Streamlit web application
-├── satellite.py                # Unified GEE & STAC satellite acquisition engine
-├── gee_utils.py                # Google Earth Engine clipping & thumbnail helpers
-├── inference.py                # TinyCD model inference, Otsu thresholding & HiResCAM XAI
+├── app.py                      # Main Streamlit web application & UI renderer
+├── satellite.py                # Native 10m Sentinel-2 GEE acquisition & quality engine
+├── gee_utils.py                # Earth Engine clipping & thumbnail helpers
+├── inference.py                # TinyCD model inference, Reference Change & HiResCAM autograd XAI
 ├── epsis_analysis.py           # Quantitative severity, classification & risk assessment
-├── geocode.py                  # Location geocoding utility
+├── geocode.py                  # Worldwide location geocoding utility
 ├── config.py                   # Centralized configuration & environment loader
+├── test_epsis_pipeline.py      # End-to-end system integration & XAI test suite
+├── test_real_changes.py        # Real temporal site change verification suite
+├── test_matrix_validation.py   # Multi-site location & date matrix quality test suite
 ├── requirements.txt            # System dependency requirements
 ├── .env.example                # Template environment variables
 ├── .gitignore                  # Git ignore rules

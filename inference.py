@@ -1,9 +1,8 @@
 """
-inference.py — GEE-Only Pretrained Model Inference & Paper-Faithful HiResCAM (IEEE ICITEICS 2025)
-=========================================================================================
+inference.py — GEE-Only Pretrained Model Inference
+==================================================
 Handles TinyCD model loading, GEE satellite preprocessing, change prediction,
-dynamic thresholding, independent Reference Change Analysis, and paper-faithful HiResCAM
-(Pre-Encoder, Post-Encoder, and Bottleneck feature activations & backward gradients).
+dynamic thresholding, and independent Reference Change Analysis.
 """
 
 import os
@@ -65,26 +64,11 @@ def _load_and_preprocess(image_path: str) -> torch.Tensor:
     tensor = _normalize(tensor)
     return tensor
 
-
-def apply_paper_attention_colormap(norm_cam: np.ndarray) -> np.ndarray:
-    """
-    Paper-faithful blue -> cyan -> green -> yellow -> red attention colormap.
-    Blue: Extremely Low (0.0 - 0.2)
-    Cyan: Low (0.2 - 0.4)
-    Green: Medium (0.4 - 0.6)
-    Yellow: High (0.6 - 0.8)
-    Red: Extremely High (0.8 - 1.0)
-    """
-    cam_u8 = (np.clip(norm_cam, 0, 1) * 255).astype(np.uint8)
-    bgr_color = cv2.applyColorMap(cam_u8, cv2.COLORMAP_JET)
-    return cv2.cvtColor(bgr_color, cv2.COLOR_BGR2RGB)
-
-
 def compute_reference_change_analysis(ref_path: str, comp_path: str, out_size: tuple = None) -> np.ndarray:
     """
     Computes an independent temporal difference reference change map directly from T1 and T2 GEE images.
     Combines per-channel color difference, normalized spectral difference, and structural difference.
-    Returns a binary uint8 array (0 = black, 255 = white).
+    Returns a continuous 0–255 grayscale uint8 array (0 = black/low difference, 255 = white/strong difference).
     """
     img1 = cv2.imread(ref_path)
     img2 = cv2.imread(comp_path)
@@ -92,15 +76,19 @@ def compute_reference_change_analysis(ref_path: str, comp_path: str, out_size: t
         h, w = (out_size[1], out_size[0]) if out_size else (256, 256)
         return np.zeros((h, w), dtype=np.uint8)
 
+    # Ensure identical dimensions between T1 and T2
     if out_size is not None and (img1.shape[1], img1.shape[0]) != out_size:
         img1 = cv2.resize(img1, out_size, interpolation=cv2.INTER_CUBIC)
         img2 = cv2.resize(img2, out_size, interpolation=cv2.INTER_CUBIC)
+    elif (img1.shape[1], img1.shape[0]) != (img2.shape[1], img2.shape[0]):
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]), interpolation=cv2.INTER_CUBIC)
 
     # 1. Absolute RGB difference
-    diff_rgb = cv2.absdiff(img1, img2).astype(np.float32)
-    diff_mag = np.linalg.norm(diff_rgb, axis=-1)
+    diff_rgb = cv2.absdiff(img1.astype(np.float32), img2.astype(np.float32))
+    # Euclidean magnitude in 3D color space (normalized to 0..255)
+    diff_mag = np.linalg.norm(diff_rgb, axis=-1) / np.sqrt(3.0)
 
-    # 2. Normalized spectral difference
+    # 2. Spectral grayscale intensity difference
     g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY).astype(np.float32)
     g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY).astype(np.float32)
     diff_gray = np.abs(g1 - g2)
@@ -110,134 +98,118 @@ def compute_reference_change_analysis(ref_path: str, comp_path: str, out_size: t
     blur2 = cv2.GaussianBlur(g2, (5, 5), 0)
     diff_struct = np.abs(blur1 - blur2)
 
-    # Combined score
+    # Combined physical difference score (0 .. 255)
     combined_score = (diff_mag * 0.5) + (diff_gray * 0.3) + (diff_struct * 0.2)
-    denom = combined_score.max() - combined_score.min()
-    norm_score = (combined_score - combined_score.min()) / denom if denom > 1e-6 else np.zeros_like(combined_score)
 
-    score_u8 = (norm_score * 255).astype(np.uint8)
-    val, thresh_bin = cv2.threshold(score_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Zero out invalid/zero margin pixels or cloud-masked black background
+    zero_mask = (g1 < 1.0) | (g2 < 1.0)
+    combined_score[zero_mask] = 0.0
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    clean_ref = cv2.morphologyEx(thresh_bin, cv2.MORPH_OPEN, kernel)
-    clean_ref = cv2.morphologyEx(clean_ref, cv2.MORPH_CLOSE, kernel)
+    # Continuous 0..255 grayscale change map (NO binary Otsu thresholding!)
+    clean_ref = np.clip(combined_score, 0, 255).astype(np.uint8)
 
     return clean_ref
 
 
-def generate_paper_hirescam_triplet(model: torch.nn.Module, ref_tensor: torch.Tensor, test_tensor: torch.Tensor,
-                                     ref_bg_rgb: np.ndarray = None, comp_bg_rgb: np.ndarray = None,
-                                     target_size: tuple = None, alpha: float = 0.50) -> dict:
+def generate_hirescam_attention_map(model: torch.nn.Module,
+                                    ref_tensor: torch.Tensor,
+                                    test_tensor: torch.Tensor,
+                                    bg_rgb: np.ndarray = None,
+                                    target_size: tuple = None,
+                                    alpha: float = 0.55) -> tuple:
     """
-    Paper-Faithful HiResCAM Implementation for Satellite Change Detection (IEEE ICITEICS 2025).
-    Captures deep convolutional feature activations and backward gradients during inference.
-    Renders 3 distinct attention heatmaps (Pre, Post, Bottleneck) overlaid on GEE imagery.
+    Computes Paper-Faithful HiResCAM Explainability for TinyCD Siamese U-Net.
+    Derives feature attribution heatmap from forward activations & backward gradients.
     """
+    device = next(model.parameters()).device
     model.eval()
-    ref = ref_tensor.clone().requires_grad_(True)
-    test = test_tensor.clone().requires_grad_(True)
 
-    features = model._encode(ref, test)
-    latents = model._decode(features)
+    # Create T1/T2 tensor clones with autograd enabled
+    ref = ref_tensor.clone().detach().requires_grad_(True)
+    test = test_tensor.clone().detach().requires_grad_(True)
 
-    ref_feat = features[-2]
-    test_feat = features[-1]
-    bot_feat = latents
+    with torch.enable_grad():
+        features = model._encode(ref, test)
+        latents = model._decode(features)
+        latents.retain_grad()
 
-    ref_feat.retain_grad()
-    test_feat.retain_grad()
-    bot_feat.retain_grad()
+        output = model._classify(latents)
+        prob_map = output.squeeze()
 
-    output = model._classify(latents)
-    prob_map = output.squeeze()
-
-    # Target gradient backward pass
-    mask_weights = (prob_map >= 0.01).float()
-    if mask_weights.sum() > 0:
-        target = (prob_map * mask_weights).sum()
-    else:
+        # Define change prediction target for backward gradient pass
+        # Differentiable total change score across model output
         target = prob_map.sum()
 
-    model.zero_grad()
-    target.backward()
+        model.zero_grad()
+        target.backward()
+
+        feat_act = latents.detach()
+        feat_grad = latents.grad.detach() if latents.grad is not None else None
 
     out_w, out_h = target_size if target_size else (IMG_SIZE, IMG_SIZE)
 
-    def compute_cam(feat, grad):
-        if feat is None or grad is None:
-            return None, 0.0, 0.0, 0.0, False
-        g_std = float(grad.detach().std().cpu())
-        if g_std < 1e-12:
-            return None, float(feat.detach().mean().cpu()), g_std, 0.0, False
+    valid_cam = False
+    act_mean = float(feat_act.mean().cpu()) if feat_act is not None else 0.0
+    act_std = float(feat_act.std().cpu()) if feat_act is not None else 0.0
+    grad_std = float(feat_grad.std().cpu()) if feat_grad is not None else 0.0
+    grad_mean = float(feat_grad.mean().cpu()) if feat_grad is not None else 0.0
 
-        # Elementwise activation * gradient (A * dY/dA)
-        cam = (feat * grad).sum(dim=1).squeeze().detach().cpu().numpy()
-        cam = np.maximum(cam, 0)
-        cam_std = float(cam.std())
-        if np.isnan(cam).any() or np.isinf(cam).any() or cam_std < 1e-10:
-            return None, float(feat.detach().mean().cpu()), g_std, cam_std, False
+    if feat_act is not None and feat_grad is not None and grad_std > 1e-12:
+        # HiResCAM elementwise activation * gradient (A * dY/dA) summed across channels
+        raw_cam = (feat_act * feat_grad).sum(dim=1).squeeze().cpu().numpy()
+        cam_std = float(raw_cam.std())
 
-        c_min, c_max = float(cam.min()), float(cam.max())
-        norm_cam = (cam - c_min) / (c_max - c_min) if c_max > c_min else np.zeros_like(cam)
-        return norm_cam, float(feat.detach().mean().cpu()), g_std, cam_std, True
+        if not (np.isnan(raw_cam).any() or np.isinf(raw_cam).any()) and cam_std > 1e-10:
+            valid_cam = True
 
-    norm_pre, act_pre, grad_pre, cam_std_pre, valid_pre = compute_cam(ref_feat, ref_feat.grad)
-    norm_post, act_post, grad_post, cam_std_post, valid_post = compute_cam(test_feat, test_feat.grad)
-    norm_bot, act_bot, grad_bot, cam_std_bot, valid_bot = compute_cam(bot_feat, bot_feat.grad)
+    if valid_cam:
+        c_min, c_max = float(raw_cam.min()), float(raw_cam.max())
+        denom = c_max - c_min
+        norm_cam = (raw_cam - c_min) / denom if denom > 1e-6 else np.zeros_like(raw_cam)
+    else:
+        # Fallback to normalized probability map if gradients are flat
+        raw_p = prob_map.detach().cpu().numpy()
+        p_min, p_max = float(raw_p.min()), float(raw_p.max())
+        denom = p_max - p_min
+        norm_cam = (raw_p - p_min) / denom if denom > 1e-6 else np.zeros_like(raw_p)
+        cam_std = float(norm_cam.std())
 
-    def blend_cam(norm_cam, bg_rgb):
-        if norm_cam is None:
-            return None
-        cam_u8 = (np.clip(norm_cam, 0, 1) * 255).astype(np.uint8)
-        cam_u8_resized = cv2.resize(cam_u8, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
-        norm_resized = cam_u8_resized.astype(np.float32) / 255.0
-        cam_rgb = apply_paper_attention_colormap(norm_resized)
+    # Resize normalized heatmap to target GEE ROI dimensions
+    cam_u8 = (np.clip(norm_cam, 0, 1) * 255).astype(np.uint8)
+    cam_resized = cv2.resize(cam_u8, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
+    norm_resized = cam_resized.astype(np.float32) / 255.0
 
-        if bg_rgb is not None:
-            bg_resized = cv2.resize(bg_rgb, (out_w, out_h))
-            att_weight = np.clip(norm_resized, 0.15, 1.0)[:, :, np.newaxis] * alpha
-            blended = (bg_resized.astype(float) * (1.0 - att_weight) + cam_rgb.astype(float) * att_weight).astype(np.uint8)
-            return blended
-        return cam_rgb
+    # Colorize using JET colormap (Blue -> Cyan -> Green -> Yellow -> Red)
+    bgr_color = cv2.applyColorMap(cam_resized, cv2.COLORMAP_JET)
+    rgb_color = cv2.cvtColor(bgr_color, cv2.COLOR_BGR2RGB)
 
-    hirescam_pre = blend_cam(norm_pre, ref_bg_rgb) if valid_pre else None
-    hirescam_post = blend_cam(norm_post, comp_bg_rgb) if valid_post else None
-    hirescam_bot = blend_cam(norm_bot, comp_bg_rgb) if valid_bot else None
+    if bg_rgb is not None:
+        bg_resized = cv2.resize(bg_rgb, (out_w, out_h))
+        att_weight = np.clip(norm_resized, 0.15, 1.0)[:, :, np.newaxis] * alpha
+        blended = (bg_resized.astype(float) * (1.0 - att_weight) + rgb_color.astype(float) * att_weight).astype(np.uint8)
+        final_hirescam = blended
+    else:
+        final_hirescam = rgb_color
 
-    # Fallback visualization if gradient was flat
-    if hirescam_pre is None and ref_bg_rgb is not None:
-        raw_prob = prob_map.detach().cpu().numpy()
-        p_min, p_max = float(raw_prob.min()), float(raw_prob.max())
-        norm_p = (raw_prob - p_min) / (p_max - p_min) if p_max > p_min else np.zeros_like(raw_prob)
-        hirescam_pre = blend_cam(norm_p * 0.2, ref_bg_rgb)
-        valid_pre = True
-
-    if hirescam_post is None and comp_bg_rgb is not None:
-        raw_prob = prob_map.detach().cpu().numpy()
-        p_min, p_max = float(raw_prob.min()), float(raw_prob.max())
-        norm_p = (raw_prob - p_min) / (p_max - p_min) if p_max > p_min else np.zeros_like(raw_prob)
-        hirescam_post = blend_cam(norm_p, comp_bg_rgb)
-        valid_post = True
-
-    if hirescam_bot is None and comp_bg_rgb is not None:
-        hirescam_bot = hirescam_post
-
-    return {
-        "hirescam_pre": hirescam_pre,
-        "hirescam_post": hirescam_post,
-        "hirescam_bot": hirescam_bot,
-        "valid_pre": valid_pre,
-        "valid_post": valid_post,
-        "valid_bot": valid_bot,
-        "pre_act_mean": act_pre, "pre_grad_std": grad_pre, "pre_cam_std": cam_std_pre,
-        "post_act_mean": act_post, "post_grad_std": grad_post, "post_cam_std": cam_std_post,
-        "bot_act_mean": act_bot, "bot_grad_std": grad_bot, "bot_cam_std": cam_std_bot,
-        "target_layers": {
-            "pre_encoder": "Encoder A Deep Conv Features",
-            "post_encoder": "Encoder B Deep Conv Features",
-            "bottleneck": "Siamese Bottleneck Fused Latents",
-        }
+    stats = {
+        "valid_cam": valid_cam,
+        "act_shape": list(feat_act.shape),
+        "act_mean": act_mean,
+        "act_std": act_std,
+        "grad_shape": list(feat_grad.shape) if feat_grad is not None else [],
+        "grad_mean": grad_mean,
+        "grad_std": grad_std,
+        "cam_std": cam_std,
+        "cam_min": float(norm_cam.min()),
+        "cam_max": float(norm_cam.max()),
+        "cam_mean": float(norm_cam.mean()),
+        "nan_count": int(np.isnan(norm_cam).sum()),
+        "inf_count": int(np.isinf(norm_cam).sum()),
+        "target_layer": "Siamese Decoder Fused Latents (_decode)",
     }
+
+    return final_hirescam, stats
+
 
 
 def predict_change(model: torch.nn.Module, ref_path: str, comp_path: str, threshold: float = 0.45,
@@ -245,7 +217,7 @@ def predict_change(model: torch.nn.Module, ref_path: str, comp_path: str, thresh
     """
     Runs TinyCD change detection on CURRENT GEE T1 and T2 images.
     Applies spatial mapping to match original ROI dimensions and dynamic thresholding.
-    Computes independent Reference Change Analysis and Paper-Faithful HiResCAM.
+    Computes independent Reference Change Analysis.
     """
     device = next(model.parameters()).device
 
@@ -299,21 +271,20 @@ def predict_change(model: torch.nn.Module, ref_path: str, comp_path: str, thresh
     # Independent Reference Change Analysis directly from GEE T1/T2
     ref_change_mask = compute_reference_change_analysis(ref_path, comp_path, out_size=(target_w, target_h))
     ref_change_rgb = np.stack([ref_change_mask] * 3, axis=-1).astype(np.uint8)
-    ref_changed_fraction = float((ref_change_mask > 0).sum() / ref_change_mask.size)
+    ref_changed_fraction = float((ref_change_mask > 30).sum() / ref_change_mask.size)
 
     # Overlay on T2 image
     overlay_rgb = create_change_overlay(t2_rgb, clean_mask)
 
-    # Generate Paper-Faithful HiResCAM Triplet (Pre, Post, Bottleneck)
-    hirescam_res = generate_paper_hirescam_triplet(
+    # Generate Paper-Faithful HiResCAM Attention Map (activations * gradients)
+    hirescam_rgb, hirescam_stats = generate_hirescam_attention_map(
         model, ref_tensor, test_tensor,
-        ref_bg_rgb=t1_rgb, comp_bg_rgb=t2_rgb,
-        target_size=(target_w, target_h), alpha=0.55
+        bg_rgb=t2_rgb, target_size=(target_w, target_h), alpha=0.55
     )
 
     # Diagnostic logging
     print("\n" + "=" * 70)
-    print("      EPSIS MODEL INFERENCE & HIRESCAM AUDIT LOG")
+    print("      EPSIS MODEL INFERENCE AUDIT LOG")
     print("=" * 70)
     print(f"  GEE ROI Dimensions (W x H)    : {target_w}x{target_h} px")
     print(f"  Model Logits / Prob (Min/Max) : {p_min:.6f} / {p_max:.6f} (Mean: {p_mean:.6f})")
@@ -321,26 +292,34 @@ def predict_change(model: torch.nn.Module, ref_path: str, comp_path: str, thresh
     print(f"  Predicted Change Percentage   : {changed_fraction * 100.0:.3f}% ({changed_pixels} px)")
     print(f"  Binary Mask Unique Values     : {np.unique(val_mask).tolist()}")
     print(f"  Reference Analysis Change %   : {ref_changed_fraction * 100.0:.3f}%")
-    print(f"  HiResCAM Pre (Act/Grad/CAM)   : Act={hirescam_res['pre_act_mean']:.3f}, GradStd={hirescam_res['pre_grad_std']:.6f}, CAMStd={hirescam_res['pre_cam_std']:.4f}")
-    print(f"  HiResCAM Post (Act/Grad/CAM)  : Act={hirescam_res['post_act_mean']:.3f}, GradStd={hirescam_res['post_grad_std']:.6f}, CAMStd={hirescam_res['post_cam_std']:.4f}")
     print("=" * 70 + "\n")
+
+    print("=== EPSIS HIRESCAM DEBUG ===")
+    print(f"  T1 Tensor Shape / Device     : {list(ref_tensor.shape)} / {ref_tensor.device}")
+    print(f"  T2 Tensor Shape / Device     : {list(test_tensor.shape)} / {test_tensor.device}")
+    print(f"  T1 Statistics (Min/Max/Mean) : [{ref_tensor.min():.4f}, {ref_tensor.max():.4f}, {ref_tensor.mean():.4f}, std={ref_tensor.std():.4f}]")
+    print(f"  T2 Statistics (Min/Max/Mean) : [{test_tensor.min():.4f}, {test_tensor.max():.4f}, {test_tensor.mean():.4f}, std={test_tensor.std():.4f}]")
+    print(f"  Target Layer / Valid CAM     : {hirescam_stats['target_layer']} / {hirescam_stats['valid_cam']}")
+    print(f"  Activations (Shape/Mean/Std) : {hirescam_stats['act_shape']} / mean={hirescam_stats['act_mean']:.4f}, std={hirescam_stats['act_std']:.4f}")
+    print(f"  Gradients (Shape/Mean/Std)   : {hirescam_stats['grad_shape']} / mean={hirescam_stats['grad_mean']:.6f}, std={hirescam_stats['grad_std']:.6f}")
+    print(f"  HiResCAM Stats (Min/Max/Mean): [{hirescam_stats['cam_min']:.4f}, {hirescam_stats['cam_max']:.4f}, {hirescam_stats['cam_mean']:.4f}, std={hirescam_stats['cam_std']:.4f}]")
+    print(f"  NaN Count / Inf Count        : {hirescam_stats['nan_count']} / {hirescam_stats['inf_count']}")
+    print(f"  Display Dimensions (W x H)   : {target_w}x{target_h} px")
+    print("=============================\n")
 
     return {
         "probability_map": prob_map,
         "binary_mask": clean_mask,
         "effective_threshold": effective_thresh,
         "changed_fraction": changed_fraction,
-        "prob_map_rgb": colorize_probability_map(prob_map),
+        "prob_map_rgb": hirescam_rgb,
         "binary_mask_rgb": binary_mask_rgb,
         "reference_change_analysis": ref_change_rgb,
         "ref_changed_fraction": ref_changed_fraction,
         "confidence_rgb": colorize_confidence_map(prob_map, effective_thresh),
         "overlay_rgb": overlay_rgb,
-        "hirescam_pre": hirescam_res["hirescam_pre"],
-        "hirescam_post": hirescam_res["hirescam_post"],
-        "hirescam_bot": hirescam_res["hirescam_bot"],
-        "hirescam_rgb": hirescam_res["hirescam_post"],
-        "hirescam_stats": hirescam_res,
+        "hirescam_rgb": hirescam_rgb,
+        "hirescam_stats": hirescam_stats,
         "target_w": target_w,
         "target_h": target_h,
         "p_min": p_min,

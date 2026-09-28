@@ -104,12 +104,13 @@ def validate_image_quality(ref_img: Image.Image, comp_img: Image.Image, meta: di
             f"Quality Check Failed: T1 output dimensions ({w1}x{h1}) are significantly below native 10m expectation ({expected_w}x{expected_h})."
         )
 
-    # 4. Aspect Ratio Match
-    roi_aspect = width_m / max(1.0, height_m)
+    # 4. Aspect Ratio Match (in EPSG:4326 coordinate system)
+    min_lon, min_lat, max_lon, max_lat = bbox
+    degree_aspect = (max_lon - min_lon) / max(1e-6, (max_lat - min_lat))
     t1_aspect = w1 / max(1.0, h1)
-    if abs(t1_aspect - roi_aspect) > 0.20:
+    if abs(t1_aspect - degree_aspect) > 0.15:
         raise ValueError(
-            f"Quality Check Failed: T1 aspect ratio ({t1_aspect:.2f}) does not match ROI aspect ratio ({roi_aspect:.2f})."
+            f"Quality Check Failed: T1 aspect ratio ({t1_aspect:.2f}) does not match ROI degree aspect ratio ({degree_aspect:.2f})."
         )
 
     # 5. Valid RGB Channels
@@ -131,8 +132,8 @@ def validate_image_quality(ref_img: Image.Image, comp_img: Image.Image, meta: di
         )
 
     # 8. Unnecessary Downsampling Check
-    if w1 < 80 or h1 < 80:
-        raise ValueError(f"Quality Error: Thumbnail is too small ({w1}x{h1} px) to display native spatial detail.")
+    if w1 < 500 or h1 < 500:
+        raise ValueError(f"Quality Error: Thumbnail is too small ({w1}x{h1} px) to display native spatial detail without blur.")
 
     # 9. Bitemporal Dimension Match
     if abs(w1 - w2) > 5 or abs(h1 - h2) > 5:
@@ -258,8 +259,8 @@ def _try_fetch_gee(lat, lon, bbox, b_dt: datetime.date, a_dt: datetime.date, tol
     try:
         region = ee.Geometry.BBox(bbox[0], bbox[1], bbox[2], bbox[3])
         width_m, height_m, expected_w, expected_h = compute_expected_native_dimensions(bbox)
-        # Compute dimension ensuring native 10m pixel preservation with smooth high-DPI scaling
-        target_dim = max(expected_w, expected_h, 800)
+        # Compute dynamic dimension ensuring native 10m detail preservation and sharp high-DPI frontend display
+        target_dim = max(expected_w, expected_h, 1024)
 
         def get_single_gee_acquisition(target_dt: datetime.date):
             search_tiers = [
@@ -303,7 +304,7 @@ def _try_fetch_gee(lat, lon, bbox, b_dt: datetime.date, a_dt: datetime.date, tol
                         candidates.sort(key=lambda c: c[0])
                         best_cost, best_days, best_cloud, best_acq_dt, best_scene_id, best_feat = candidates[0]
 
-                        # Apply bicubic sub-pixel resampling for smooth continuous rendering
+                        # Apply bicubic sub-pixel resampling for smooth continuous ground rendering without blocky square pixelation
                         img = ee.Image(best_scene_id).resample("bicubic").clip(region)
 
                         # Cloud probability + SCL shadow masking
@@ -324,13 +325,13 @@ def _try_fetch_gee(lat, lon, bbox, b_dt: datetime.date, a_dt: datetime.date, tol
                         ))
                         combined_cloud_mask = scl_mask.Or(cloud_prob_mask)
 
-                        # Consistent RGB visualization parameters (min=150, max=2200, gamma=1.25) across T1/T2
+                        # High-DPI RGB visualization parameters (min=150, max=2200, gamma=1.25) across T1/T2
                         vis_params = {
                             "bands": ["B4", "B3", "B2"],
                             "min": 150,
                             "max": 2200,
                             "gamma": 1.25,
-                            "scale": 10,
+                            "dimensions": target_dim,
                             "crs": "EPSG:4326",
                             "region": region,
                             "format": "png",
@@ -343,7 +344,7 @@ def _try_fetch_gee(lat, lon, bbox, b_dt: datetime.date, a_dt: datetime.date, tol
                         }
 
                         thumb_params = {
-                            "scale": 10,
+                            "dimensions": target_dim,
                             "crs": "EPSG:4326",
                             "region": region,
                             "format": "png",
@@ -391,7 +392,7 @@ def _try_fetch_gee(lat, lon, bbox, b_dt: datetime.date, a_dt: datetime.date, tol
                             "min": 7000,
                             "max": 18000,
                             "gamma": 1.2,
-                            "scale": 30,
+                            "dimensions": target_dim,
                             "crs": "EPSG:4326",
                             "region": region,
                             "format": "png"
